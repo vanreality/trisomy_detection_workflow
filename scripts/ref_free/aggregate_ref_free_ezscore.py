@@ -25,6 +25,22 @@ def _ez_ratio_col(cutoff: float) -> str:
     return f"ezscore_signal_ratio_{cutoff:g}"
 
 
+def _primary_ez_cutoff(config: dict, ez_cutoffs: list[float]) -> float:
+    """Fixed combo → 4.5; filtered/all → 3.0 (fallback to nearest available)."""
+    if "primary_ez_cutoff" in config:
+        primary = float(config["primary_ez_cutoff"])
+    elif str(config.get("combo_mode", "")) == "fixed":
+        primary = 4.5
+    else:
+        primary = 3.0
+    if primary in ez_cutoffs:
+        return primary
+    # Prefer max for fixed (stricter), else first grid value.
+    if str(config.get("combo_mode", "")) == "fixed":
+        return ez_cutoffs[-1]
+    return ez_cutoffs[0]
+
+
 def _load_slices(out_root: Path, n_eval: int, ez_cutoffs: list[float]):
     ep_counts = np.zeros(n_eval, dtype=np.int64)
     z_counts = np.zeros(n_eval, dtype=np.int64)
@@ -109,9 +125,9 @@ def main(output_base: str, total_repeats: int | None, ff_min: float) -> None:
     for c in ez_cutoffs:
         result[_ez_count_col(c)] = ez_counts[c]
         result[_ez_ratio_col(c)] = ez_counts[c] / ez_denom
-    if 3.0 in ez_cutoffs:
-        result["ezscore_abnormal_count"] = result[_ez_count_col(3.0)]
-        result["ezscore_signal_ratio"] = result[_ez_ratio_col(3.0)]
+    primary_ez = _primary_ez_cutoff(config, ez_cutoffs)
+    result["ezscore_abnormal_count"] = result[_ez_count_col(primary_ez)]
+    result["ezscore_signal_ratio"] = result[_ez_ratio_col(primary_ez)]
 
     # Drop val blacklist before publishing ratios / separation
     result = drop_blacklisted(result)
@@ -153,6 +169,8 @@ def main(output_base: str, total_repeats: int | None, ff_min: float) -> None:
         "n_z_combos": int(config["n_z_combos"]),
         "n_ez_combos": int(config["n_ez_combos"]),
         "ez_cutoffs": ez_cutoffs,
+        "primary_ez_cutoff": primary_ez,
+        "combo_mode": config.get("combo_mode"),
         "episcore_denominator": ep_denom,
         "zscore_denominator": z_denom,
         "ezscore_denominator": ez_denom,
@@ -170,10 +188,10 @@ def main(output_base: str, total_repeats: int | None, ff_min: float) -> None:
     console.print(f"[green]OK[/green] Aggregated {n_files} slice files")
     console.print(f"  -> {out_path}")
     console.print(f"  -> {summary_path}")
-    ez3 = sep_eval.get("ezscore", {}).get(3.0, {})
+    ez_pri = sep_eval.get("ezscore", {}).get(primary_ez, {})
     console.print(
-        f"  eval sep@ez3 AUC={ez3.get('sep', float('nan')):.4f} "
-        f"(N={ez3.get('n_normal')}, T={ez3.get('n_trisomy')})"
+        f"  eval sep@ez{primary_ez:g} AUC={ez_pri.get('sep', float('nan')):.4f} "
+        f"(N={ez_pri.get('n_normal')}, T={ez_pri.get('n_trisomy')})"
     )
 
 

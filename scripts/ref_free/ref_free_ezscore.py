@@ -128,20 +128,24 @@ def _generate_half_partitions(
     half: int,
     n_repeats: int,
     rng: np.random.Generator,
-) -> Tuple[List[np.ndarray], List[np.ndarray]]:
+) -> Tuple[np.ndarray, np.ndarray]:
     """Draw two disjoint halves of size ``half`` from a larger pool.
 
     When ``pool_size > 2 * half``, the remaining samples are unused that repeat.
+
+    Returns
+    -------
+    ref_draws, ez_draws : ndarray, shape (n_repeats, half), dtype int64
     """
     need = 2 * half
     if pool_size < need:
         raise ValueError(f"pool_size={pool_size} must be >= 2 * half={need}")
-    ref_draws: List[np.ndarray] = []
-    ez_draws: List[np.ndarray] = []
-    for _ in range(n_repeats):
+    ref_draws = np.empty((n_repeats, half), dtype=np.int64)
+    ez_draws = np.empty((n_repeats, half), dtype=np.int64)
+    for i in range(n_repeats):
         perm = rng.permutation(pool_size)
-        ref_draws.append(perm[:half].astype(np.int64, copy=False))
-        ez_draws.append(perm[half:need].astype(np.int64, copy=False))
+        ref_draws[i] = perm[:half]
+        ez_draws[i] = perm[half:need]
     return ref_draws, ez_draws
 
 
@@ -484,6 +488,10 @@ def main(
             }
         )
         eval_info.to_csv(out_root / "eval_samples.tsv", sep="\t", index=False)
+        # Fixed combo reports / plots default to ez=4.5; filtered grid keeps 3.0.
+        primary_ez_cutoff = 4.5 if use_fixed else 3.0
+        if primary_ez_cutoff not in ez_cutoffs:
+            primary_ez_cutoff = ez_cutoffs[-1] if use_fixed else ez_cutoffs[0]
         run_config = {
             "combo_mode": combo_mode,
             "ref_n": ref_n,
@@ -494,6 +502,7 @@ def main(
             "ez_cutoff_max": ez_cutoff_max,
             "ez_cutoff_step": ez_cutoff_step,
             "ez_cutoffs": ez_cutoffs,
+            "primary_ez_cutoff": primary_ez_cutoff,
             "ez_pair_mode": ez_pair_mode,
             "total_repeats": total_repeats,
             "seed": seed,

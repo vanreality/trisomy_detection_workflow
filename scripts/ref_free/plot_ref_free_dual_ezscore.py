@@ -102,13 +102,15 @@ def build_dual_figure(
     title: str,
     subtitle: str,
     ff_min: float = DEFAULT_FF_MIN,
+    default_ez: float | None = None,
 ) -> go.Figure:
     eval_df = _prepare(eval_df)
     val_df = _prepare(val_df)
     eval_ff = eval_df[eval_df["ff_before_mq"] >= ff_min]
     val_ff = val_df[val_df["ff_before_mq"] >= ff_min] if len(val_df) else val_df
 
-    default_ez = 3.0 if 3.0 in ez_cutoffs else ez_cutoffs[0]
+    if default_ez is None or default_ez not in ez_cutoffs:
+        default_ez = 3.0 if 3.0 in ez_cutoffs else ez_cutoffs[0]
     col0 = _ez_ratio_col(default_ez)
 
     sep_eval = {
@@ -237,14 +239,22 @@ def main(
     scores = Path(scores_tsv) if scores_tsv else ref_dir / "abnormality_signal_ratio.tsv"
     config = json.loads((ref_dir / "run_config.json").read_text())
     ez_cutoffs = [float(x) for x in config.get("ez_cutoffs", [3.0])]
+    if "primary_ez_cutoff" in config:
+        primary_ez = float(config["primary_ez_cutoff"])
+    elif str(config.get("combo_mode", "")) == "fixed":
+        primary_ez = 4.5
+    else:
+        primary_ez = 3.0
     df = pd.read_csv(scores, sep="\t")
     df = _prepare(df)
     is_val = df["set"].astype(str).eq("val") if "set" in df.columns else pd.Series(False, index=df.index)
     eval_df = df[~is_val]
     val_df = df[is_val]
     mode = config.get("combo_mode", "?")
-    subtitle = f"mode={mode} | pairs={config.get('n_ez_combos')}"
-    fig = build_dual_figure(eval_df, val_df, ez_cutoffs, title, subtitle, ff_min=ff_min)
+    subtitle = f"mode={mode} | pairs={config.get('n_ez_combos')} | primary ez={primary_ez:g}"
+    fig = build_dual_figure(
+        eval_df, val_df, ez_cutoffs, title, subtitle, ff_min=ff_min, default_ez=primary_ez
+    )
     out = output_html or (result_dir / "plots" / "ezscore_eval_vs_val.html")
     out.parent.mkdir(parents=True, exist_ok=True)
     fig.write_html(str(out), include_plotlyjs="cdn", full_html=True)

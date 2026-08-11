@@ -71,13 +71,15 @@ def build_figure(
     title: str,
     subtitle: str,
     ff_min: float = DEFAULT_FF_MIN,
+    default_ez: float | None = None,
 ) -> go.Figure:
     df = _prepare(df)
     # Prefer eval (non-val) for the 3-panel overview
     if "set" in df.columns:
         df = df[df["set"].astype(str).ne("val")].copy()
 
-    default_ez = 3.0 if 3.0 in ez_cutoffs else ez_cutoffs[0]
+    if default_ez is None or default_ez not in ez_cutoffs:
+        default_ez = 3.0 if 3.0 in ez_cutoffs else ez_cutoffs[0]
     ez_col0 = _ez_ratio_col(default_ez)
 
     df_ff = df[df["ff_before_mq"] >= ff_min]
@@ -230,13 +232,20 @@ def main(
         raise click.ClickException(f"Missing {scores}")
     config = json.loads(config_path.read_text()) if config_path.is_file() else {}
     ez_cutoffs = [float(x) for x in config.get("ez_cutoffs", [3.0])]
+    if "primary_ez_cutoff" in config:
+        primary_ez = float(config["primary_ez_cutoff"])
+    elif str(config.get("combo_mode", "")) == "fixed":
+        primary_ez = 4.5
+    else:
+        primary_ez = 3.0
 
     df = pd.read_csv(scores, sep="\t")
     mode = config.get("combo_mode", "?")
     if mode == "fixed":
         subtitle = (
             f"fixed combo ep {config.get('ep_threshold')}/{config.get('ep_recall')} | "
-            f"z {config.get('z_threshold')}/{config.get('z_recall')}"
+            f"z {config.get('z_threshold')}/{config.get('z_recall')} | "
+            f"primary ez={primary_ez:g}"
         )
     else:
         subtitle = (
@@ -248,7 +257,9 @@ def main(
             f"ez pairs={config.get('n_ez_combos')} ({config.get('ez_pair_mode')})"
         )
 
-    fig = build_figure(df, ez_cutoffs, title=title, subtitle=subtitle, ff_min=ff_min)
+    fig = build_figure(
+        df, ez_cutoffs, title=title, subtitle=subtitle, ff_min=ff_min, default_ez=primary_ez
+    )
     out = output_html or (result_dir / "plots" / "signal_ratio.html")
     out.parent.mkdir(parents=True, exist_ok=True)
     fig.write_html(str(out), include_plotlyjs="cdn", full_html=True)

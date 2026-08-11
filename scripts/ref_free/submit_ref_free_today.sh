@@ -72,6 +72,7 @@ if [ "$CLEAN_OLD" = 1 ]; then
 fi
 
 export TOTAL_REPEATS REPEATS_PER_JOB REF_N SEED SIF FF_MIN COMPRESS=1
+# Grid 3.0..4.5; fixed combo primary ez=4.5, filtered primary ez=3.0
 export EZ_CUTOFF_MIN=3.0 EZ_CUTOFF_MAX=4.5 EZ_CUTOFF_STEP=0.1
 export CUTOFF=3.0 MIN_FF=0
 
