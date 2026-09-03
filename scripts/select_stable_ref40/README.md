@@ -32,22 +32,49 @@ Useful knobs for `select_ref40.py`:
 - `--n-random` / `--n-swap-rounds` / `--seed`
 - `--exclude-sample ''` to allow all Normal+dev (default historically excluded `PTAY0586P8S1`)
 
+### Re-select vs meta (recommended when meta ≠ recomputed baseline)
+
+`select_ref40.py` optimizes against a **recomputed** early_ref baseline. That can
+disagree with stored meta `final_zscores` near the 4.5 cutoff (e.g. PTAY1472P9S1:
+meta Gray_T16 at 4.441 vs recompute T16 at 4.554). To keep meta/ref_17 labels:
+
+```bash
+singularity exec -B /lustre1/cqyi:/lustre1/cqyi \
+  /lustre1/cqyi/AIPT_2.0/workflow/episcore/containers/common_tools.sif \
+  python3 /lustre1/cqyi/AIPT_2.0/workflow/episcore/scripts/select_stable_ref40/reselect_vs_meta.py
+```
+
+This matches meta `final_zscores` pred masks (excluding emergency), hard-protects
+borderline Gray samples (`PTAY1472P9S1`, `PTAY1253P6H1`, `PTAY0704P7H1`), and
+rewrites `temporary_updated_samplesheet_ref40.csv`.
+
 ## Outputs
 
-Directory: `/lustre1/cqyi/AIPT_2.0/data/meta/episcore/20260730-stable_ref40/`
+Directory: `/lustre1/cqyi/AIPT_2.0/data/meta/episcore/20260812-stable_ref40/`
+(prior run: `20260730-stable_ref40/`)
 
 | File | Description |
 |------|-------------|
 | `beta.csv` | Episcore source table (all meta samples) |
 | `percentage.csv` | Zscore percentages at cutoff=0.85 |
-| `zscore_fetch_report.tsv` | Per-missing-sample fetch status |
 | `ref40_samples.txt` | Selected ref_40 list |
 | `baseline_score.tsv` / `ref40_score.tsv` | Recalculated scores |
 | `reference_meanstd_compare.tsv` | early_ref vs ref_40 mean/std |
-| `pred_label_compare.tsv` | Pred-label diffs (ezscore cutoff 4.5) |
+| `pred_label_compare.tsv` | Pred-label diffs vs meta |
 | `selection_summary.json` | Search metrics |
 | `temporary_updated_samplesheet_ref40.csv` | Updated meta (`ref_type` + `*_zscores` + `pred_label`) |
-| `plot_*.png` | Summary figures |
+| `ref40_episcore_matrix.tsv` | Episcore reference (wide; early_reference format) |
+| `ref40_zscore_matrix.csv` | Zscore reference (long; percentage + adj_percentage) |
+| `ref40_ezscore_matrix.csv` | EZscore chr mu/sigma over fixed 25 ezscore refs |
+
+Build matrices only:
+
+```bash
+singularity exec -B /lustre1/cqyi:/lustre1/cqyi \
+  /lustre1/cqyi/AIPT_2.0/workflow/episcore/containers/common_tools.sif \
+  python3 scripts/select_stable_ref40/build_ref40_matrices.py \
+  --output-dir /lustre1/cqyi/AIPT_2.0/data/meta/episcore/20260812-stable_ref40
+```
 
 Also copied: `/lustre1/cqyi/syfan/nipt_article_plot/temporary_updated_samplesheet_ref40.csv`
 
