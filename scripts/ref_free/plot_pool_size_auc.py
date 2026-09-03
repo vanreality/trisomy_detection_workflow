@@ -19,6 +19,14 @@ from separation import separation_index
 
 console = Console()
 
+DEFAULT_BLACKLIST = (
+    "PTAY0577P9S1",
+    "PTAY0599P8S1",
+    "PTAY0666P7S1",
+    "PTAY0682P7S1",
+    "PTAY0689P8H1",
+)
+
 
 def _add_curve(
     fig: go.Figure,
@@ -42,8 +50,13 @@ def _add_curve(
     )
 
 
-def _fair_auc_table(mode_dir: Path, ff_min: float) -> pd.DataFrame | None:
+def _fair_auc_table(
+    mode_dir: Path,
+    ff_min: float,
+    blacklist: set[str] | None = None,
+) -> pd.DataFrame | None:
     """Recompute ez AUC on intersection samples = eval set of max pool_size."""
+    bl = blacklist or set()
     pool_dirs = sorted(
         (p for p in mode_dir.glob("pool_*") if p.is_dir() and p.name.split("_")[1].isdigit()),
         key=lambda p: int(p.name.split("_")[1]),
@@ -54,14 +67,18 @@ def _fair_auc_table(mode_dir: Path, ff_min: float) -> pd.DataFrame | None:
     core_path = largest / "abnormality_signal_ratio.tsv"
     if not core_path.is_file():
         return None
-    core_samples = set(pd.read_csv(core_path, sep="\t")["sample"].astype(str))
+    core = pd.read_csv(core_path, sep="\t")
+    core_samples = set(core.loc[~core["sample"].astype(str).isin(bl), "sample"].astype(str))
     rows = []
     for pdir in pool_dirs:
         tsv = pdir / "abnormality_signal_ratio.tsv"
         if not tsv.is_file():
             continue
         df = pd.read_csv(tsv, sep="\t")
-        sub = df[df["sample"].astype(str).isin(core_samples)].copy()
+        sub = df[
+            df["sample"].astype(str).isin(core_samples)
+            & ~df["sample"].astype(str).isin(bl)
+        ].copy()
         sep = separation_index(sub, "ezscore_signal_ratio", ff_min=ff_min)
         pool_size = int(pdir.name.split("_")[1])
         rows.append(
@@ -103,9 +120,16 @@ def _merge_pool_rows(mode_dir: Path) -> pd.DataFrame:
 @click.option("--sweep-base", required=True, type=click.Path(exists=True, file_okay=False, path_type=Path))
 @click.option("--output-dir", default=None, type=click.Path(path_type=Path))
 @click.option("--ff-min", default=0.01, show_default=True, type=float)
-def main(sweep_base: Path, output_dir: Path | None, ff_min: float) -> None:
+@click.option(
+    "--blacklist",
+    default=",".join(DEFAULT_BLACKLIST),
+    show_default=True,
+    help="Comma-separated samples excluded from fair AUC",
+)
+def main(sweep_base: Path, output_dir: Path | None, ff_min: float, blacklist: str) -> None:
     out = output_dir or (sweep_base / "plots")
     out.mkdir(parents=True, exist_ok=True)
+    bl = {s.strip() for s in blacklist.split(",") if s.strip()}
 
     mode_dir = sweep_base / "fixed"
     path = mode_dir / "pool_size_auc.tsv"
@@ -116,7 +140,7 @@ def main(sweep_base: Path, output_dir: Path | None, ff_min: float) -> None:
         df = pd.read_csv(path, sep="\t").sort_values("pool_size")
     else:
         raise click.ClickException(f"Missing pool rows / {path}")
-    fair = _fair_auc_table(sweep_base / "fixed", ff_min)
+    fair = _fair_auc_table(sweep_base / "fixed", ff_min, blacklist=bl)
     if fair is not None:
         df = df.merge(fair, on="pool_size", how="left")
         console.print(

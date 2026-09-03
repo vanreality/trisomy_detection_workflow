@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """Pool-size sweep for reference-free fixed / filtered modes.
 
-For each even ``pool_size`` in [20, 160] step 10:
+For each even ``pool_size`` in [20, 160] step 2:
   * ``ref_n = pool_size // 2`` for episcore/zscore refs and the same for ez refs
   * Candidate Normal pool = all 96 dev Normals; if ``pool_size > 96``, fill with
     randomly chosen test Normals (seeded). Fillers are excluded from eval.
+  * ``--fixed-candidate-size N``: build the candidate of size N once (same filler
+    rule); every ``pool_size`` draws ``pool_size`` refs from that fixed set.
+    ``--exclude-candidate`` drops the whole candidate from eval (not just fillers).
   * Each repeat draws ``pool_size`` Normals from the candidate pool and splits
     them evenly into epi/z vs ez reference groups.
   * After ``total-repeats``, compute signal-ratio ROC-AUC (ff≥ff_min).
@@ -237,24 +240,42 @@ def _run_one_pool(
     use_fixed: bool,
     blacklist: Sequence[str],
     n_jobs: int = 1,
+    fixed_candidate_size: Optional[int] = None,
+    exclude_candidate: bool = False,
 ) -> dict:
     half = pool_size // 2
+    cand_n = int(fixed_candidate_size) if fixed_candidate_size else int(pool_size)
+    if cand_n < pool_size:
+        raise click.ClickException(
+            f"fixed_candidate_size={cand_n} must be >= pool_size={pool_size}"
+        )
     candidate, fillers, notes = _build_candidate_pool(
-        set_arr, label_arr, pool_size, fill_seed
+        set_arr, label_arr, cand_n, fill_seed
     )
+    if fixed_candidate_size:
+        notes.append(
+            f"draw {pool_size}/repeat from fixed candidate {cand_n} "
+            f"(ref {half}+{half})"
+        )
     is_trisomy = np.array([bool(re.match(r"^T\d", s)) for s in label_arr])
     is_normal = label_arr == "Normal"
     is_dev_trisomy = (set_arr == "dev") & is_trisomy
     is_test = set_arr == "test"
-    # Eval = dev trisomy + test, drop fillers and analysis blacklist.
-    filler_mask = np.zeros(len(universe), dtype=bool)
-    filler_mask[fillers] = True
-    sample_arr = np.asarray(universe, dtype=str)
-    not_blacklisted = ~np.isin(sample_arr, list(blacklist))
-    eval_mask = (is_dev_trisomy | is_test) & ~filler_mask & not_blacklisted
+    # Eval = dev trisomy + test. Default: drop fillers only. With
+    # --exclude-candidate, drop the entire candidate (e.g. the fixed 160).
+    # Blacklist samples stay in the TSV when they are not in the dropped set.
+    drop_mask = np.zeros(len(universe), dtype=bool)
+    if exclude_candidate:
+        drop_mask[candidate] = True
+        notes.append("eval excludes entire candidate pool")
+    else:
+        drop_mask[fillers] = True
+    eval_mask = (is_dev_trisomy | is_test) & ~drop_mask
     eval_idx = np.flatnonzero(eval_mask)
     if eval_idx.size == 0:
-        raise click.ClickException(f"pool_size={pool_size}: empty eval after filler exclusion")
+        raise click.ClickException(
+            f"pool_size={pool_size}: empty eval after candidate/filler exclusion"
+        )
 
     rng = np.random.default_rng(seed)
     ref_draws, ez_draws = _generate_half_partitions(
@@ -329,8 +350,11 @@ def _run_one_pool(
             "ezscore_signal_ratio": ez_counts / float(n_ez * total_repeats),
         }
     )
+    # AUC/separation ignore analysis blacklist (still present in result TSV for plots)
+    bl_set = {str(s) for s in blacklist}
+    result_scored = result[~result["sample"].astype(str).isin(bl_set)].copy()
     sep = {
-        name: separation_index(result, col, ff_min=ff_min)
+        name: separation_index(result_scored, col, ff_min=ff_min)
         for name, col in [
             ("episcore", "episcore_signal_ratio"),
             ("zscore", "zscore_signal_ratio"),
@@ -358,6 +382,8 @@ def _run_one_pool(
         "n_normal_auc": sep["ezscore"]["n_normal"],
         "n_trisomy_auc": sep["ezscore"]["n_trisomy"],
         "notes": "; ".join(notes),
+        "fixed_candidate_size": int(fixed_candidate_size) if fixed_candidate_size else None,
+        "exclude_candidate": bool(exclude_candidate),
     }
     return {
         "row": row,
@@ -407,6 +433,18 @@ def _run_one_pool(
     type=int,
     help="Worker processes for repeat loop (0 → SLURM_CPUS_PER_TASK / N_JOBS / cpu_count)",
 )
+@click.option(
+    "--fixed-candidate-size",
+    default=None,
+    type=int,
+    help="Build this candidate size once; every pool_size draws from it (e.g. 160)",
+)
+@click.option(
+    "--exclude-candidate",
+    is_flag=True,
+    default=False,
+    help="Drop the entire candidate pool from eval (default: drop fillers only)",
+)
 def main(
     input_dir: str,
     output_base: str,
@@ -433,6 +471,8 @@ def main(
     z_recall_max: float,
     blacklist: str,
     n_jobs: int,
+    fixed_candidate_size: Optional[int],
+    exclude_candidate: bool,
 ) -> None:
     sizes = _parse_pool_sizes(pool_sizes)
     if pool_size is not None:
@@ -457,6 +497,11 @@ def main(
     console.print(f"  n_jobs  : {workers}")
     console.print(f"  ez cut  : {ez_cutoff:g}")
     console.print(f"  blacklist: {list(bl)}")
+    if fixed_candidate_size:
+        console.print(
+            f"  candidate: fixed {fixed_candidate_size} "
+            f"(exclude_candidate={exclude_candidate})"
+        )
 
     meta = pd.read_csv(input_path / "meta.csv").drop_duplicates("sample", keep="first")
     meta["sample"] = meta["sample"].astype(str)
@@ -530,12 +575,23 @@ def main(
             use_fixed=use_fixed,
             blacklist=bl,
             n_jobs=workers,
+            fixed_candidate_size=fixed_candidate_size,
+            exclude_candidate=exclude_candidate,
         )
         pool_dir = out_root / f"pool_{p}"
         pool_dir.mkdir(parents=True, exist_ok=True)
         pack["result"].to_csv(
             pool_dir / "abnormality_signal_ratio.tsv", sep="\t", index=False, float_format="%.6f"
         )
+        if fixed_candidate_size:
+            cand_path = out_root / "candidate_samples.tsv"
+            if not cand_path.is_file():
+                cand_df = (
+                    meta.loc[meta["sample"].isin(pack["candidate_samples"]), ["sample", "set", "label"]]
+                    .drop_duplicates("sample")
+                    .sort_values("sample")
+                )
+                cand_df.to_csv(cand_path, sep="\t", index=False)
         cfg = {
             "combo_mode": combo_mode,
             "pool_size": p,
@@ -548,7 +604,10 @@ def main(
             "ff_min": ff_min,
             "blacklist": list(bl),
             "filler_samples": pack["filler_samples"],
+            "candidate_samples": pack["candidate_samples"],
             "n_candidate": len(pack["candidate_samples"]),
+            "fixed_candidate_size": fixed_candidate_size,
+            "exclude_candidate": bool(exclude_candidate),
             "separation": pack["sep"],
             "row": pack["row"],
         }
@@ -605,6 +664,8 @@ def main(
                 "ez_cutoff": float(ez_cutoff),
                 "ff_min": ff_min,
                 "blacklist": list(bl),
+                "fixed_candidate_size": fixed_candidate_size,
+                "exclude_candidate": bool(exclude_candidate),
             },
             indent=2,
         )

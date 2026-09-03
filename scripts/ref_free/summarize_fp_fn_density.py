@@ -70,17 +70,40 @@ def _fp_fn_per_repeat(flags: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.
     return fp, fn, fp + fn
 
 
-def _density_table(values: np.ndarray) -> pd.DataFrame:
-    vals, counts = np.unique(values, return_counts=True)
-    n = int(values.size)
-    return pd.DataFrame(
-        {
-            "fp_plus_fn": vals.astype(int),
-            "n_repeats": counts.astype(int),
-            "density": counts.astype(float) / float(n),
-            "cum_density": np.cumsum(counts.astype(float) / float(n)),
-        }
+def _density_table(
+    fp: np.ndarray,
+    fn: np.ndarray,
+    tot: np.ndarray,
+) -> pd.DataFrame:
+    """Per FP+FN bin: density plus mean FP/FN (for stacked FP/FN coloring)."""
+    df = pd.DataFrame({"fp": fp, "fn": fn, "fp_plus_fn": tot})
+    g = (
+        df.groupby("fp_plus_fn", as_index=False)
+        .agg(
+            n_repeats=("fp_plus_fn", "size"),
+            mean_fp=("fp", "mean"),
+            mean_fn=("fn", "mean"),
+        )
+        .sort_values("fp_plus_fn")
+        .reset_index(drop=True)
     )
+    n = float(tot.size)
+    g["density"] = g["n_repeats"].astype(float) / n
+    g["cum_density"] = g["density"].cumsum()
+    # Split density by FP vs FN share within each bin (k=0 → perfect, no split)
+    k = g["fp_plus_fn"].to_numpy(dtype=float)
+    mean_fp = g["mean_fp"].to_numpy(dtype=float)
+    mean_fn = g["mean_fn"].to_numpy(dtype=float)
+    dens = g["density"].to_numpy(dtype=float)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        fp_share = np.where(k > 0, mean_fp / k, 0.0)
+        fn_share = np.where(k > 0, mean_fn / k, 0.0)
+    g["fp_share"] = fp_share
+    g["fn_share"] = fn_share
+    g["fp_density"] = dens * fp_share
+    g["fn_density"] = dens * fn_share
+    g["perfect_density"] = np.where(k == 0, dens, 0.0)
+    return g
 
 
 @click.command(context_settings={"help_option_names": ["-h", "--help"]})
@@ -149,34 +172,72 @@ def main(
     names = list(score_map) if score == "all" else [score]
 
     summary_rows = []
+    # Prefer ezscore for the stacked FP/FN beauty plot when available;
+    # fall back to the single requested score.
+    plot_name = "ezscore" if "ezscore" in names else names[0]
     fig = go.Figure()
-    colors = {
-        "episcore": "rgb(31,119,180)",
-        "zscore": "rgb(44,160,44)",
-        "ezscore": "rgb(214,39,40)",
-    }
+    FP_COLOR = "#F18F01"  # orange
+    FN_COLOR = "#2E86AB"  # blue
+    PERFECT_COLOR = "#A8DADC"  # soft teal for FP+FN=0
+
     for name in names:
         fp, fn, tot = _fp_fn_per_repeat(score_map[name], y)
-        dens = _density_table(tot)
+        dens = _density_table(fp, fn, tot)
         dens.to_csv(out / f"fp_fn_density_{name}.tsv", sep="\t", index=False, float_format="%.6f")
         per_rep = pd.DataFrame({"fp": fp, "fn": fn, "fp_plus_fn": tot})
         # store compact histogram only by default; optional sample of worst reps
         worst = per_rep.nlargest(20, "fp_plus_fn")
         worst.to_csv(out / f"worst_repeats_{name}.tsv", sep="\t", index=False)
 
-        fig.add_trace(
-            go.Bar(
-                x=dens["fp_plus_fn"],
-                y=dens["density"],
-                name=name,
-                marker_color=colors[name],
-                opacity=0.85 if len(names) == 1 else 0.65,
-                hovertemplate="FP+FN=%{x}<br>density=%{y:.4f}<br>n=%{customdata}<extra>"
-                + name
-                + "</extra>",
-                customdata=dens["n_repeats"],
+        if name == plot_name:
+            # Stacked: orange=FP share, blue=FN share; teal for perfect (0)
+            custom = np.column_stack(
+                [
+                    dens["n_repeats"],
+                    dens["mean_fp"],
+                    dens["mean_fn"],
+                    dens["fp_share"],
+                    dens["fn_share"],
+                    dens["density"],
+                ]
             )
-        )
+            hover = (
+                "FP+FN=%{x}<br>density=%{customdata[5]:.4f}<br>n=%{customdata[0]}"
+                "<br>mean FP=%{customdata[1]:.2f} · mean FN=%{customdata[2]:.2f}"
+                "<br>FP share=%{customdata[3]:.1%} · FN share=%{customdata[4]:.1%}"
+                "<extra></extra>"
+            )
+            fig.add_trace(
+                go.Bar(
+                    x=dens["fp_plus_fn"],
+                    y=dens["perfect_density"],
+                    name="perfect (0 errors)",
+                    marker=dict(color=PERFECT_COLOR, line=dict(width=0)),
+                    hovertemplate=hover,
+                    customdata=custom,
+                )
+            )
+            fig.add_trace(
+                go.Bar(
+                    x=dens["fp_plus_fn"],
+                    y=dens["fp_density"],
+                    name="FP share",
+                    marker=dict(color=FP_COLOR, line=dict(width=0)),
+                    hovertemplate=hover,
+                    customdata=custom,
+                )
+            )
+            fig.add_trace(
+                go.Bar(
+                    x=dens["fp_plus_fn"],
+                    y=dens["fn_density"],
+                    name="FN share",
+                    marker=dict(color=FN_COLOR, line=dict(width=0)),
+                    hovertemplate=hover,
+                    customdata=custom,
+                )
+            )
+
         summary_rows.append(
             {
                 "score": name,
@@ -202,19 +263,25 @@ def main(
 
     fig.update_layout(
         title=(
-            "40+40 fixed-combo: repeat density of FP+FN<br>"
+            f"40+40 fixed-combo: FP+FN density ({plot_name}) — bar fill = FP/FN share<br>"
             f"<sup>ff≥{ff_min*100:.0f}% · ez_cutoff={cfg.get('ez_cutoff')} · "
-            f"n_rep={flags_ez.shape[0]:,} · N={int((~y).sum())} T={int(y.sum())}</sup>"
+            f"n_rep={flags_ez.shape[0]:,} · N={int((~y).sum())} T={int(y.sum())} · "
+            f"orange=FP · blue=FN</sup>"
         ),
         xaxis_title="FP + FN (per repeat)",
         yaxis_title="repeat density",
-        barmode="group",
+        barmode="stack",
+        bargap=0.12,
         template="plotly_white",
-        height=520,
-        width=900,
-        legend=dict(orientation="h", y=-0.18),
-        margin=dict(t=90, b=80),
+        height=540,
+        width=920,
+        legend=dict(orientation="h", y=-0.18, bgcolor="rgba(0,0,0,0)"),
+        margin=dict(t=100, b=90, l=60, r=30),
+        plot_bgcolor="rgba(248,249,250,1)",
+        paper_bgcolor="white",
     )
+    fig.update_xaxes(dtick=1, showgrid=False)
+    fig.update_yaxes(gridcolor="rgba(0,0,0,0.06)", zeroline=False)
     html = out / "fp_fn_density.html"
     fig.write_html(str(html), include_plotlyjs="cdn", full_html=True)
 
