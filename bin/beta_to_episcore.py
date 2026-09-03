@@ -134,42 +134,83 @@ def calculate_chr_level_beta(
     hyper: pd.DataFrame,
     chr_list: List[str],
     meth_col: str,
-    unmeth_col: str
+    unmeth_col: Optional[str] = None,
+    total_col: Optional[str] = None,
 ) -> Tuple[np.ndarray, np.ndarray, Dict[str, int], Dict[str, int]]:
     """
     Calculate chromosome-level beta values from CpG-level data.
-    
-    Args:
-        hypo: DataFrame with hypomethylated CpG sites.
-        hyper: DataFrame with hypermethylated CpG sites.
-        chr_list: List of chromosome names to process.
-        meth_col: Column name for methylated counts.
-        unmeth_col: Column name for unmethylated counts.
-        
-    Returns:
-        Tuple containing:
-            - hypo_chr_beta: Array of chromosome-level beta values for hypo
-            - hyper_chr_beta: Array of chromosome-level beta values for hyper
-            - hypo_chr_counts: Dictionary of CpG counts per chromosome for hypo
-            - hyper_chr_counts: Dictionary of CpG counts per chromosome for hyper
+
+    Chromosome beta is ``sum(meth) / sum(total)`` when *total_col* is set,
+    otherwise ``sum(meth) / (sum(meth) + sum(unmeth))``.
     """
-    # Count CpG sites per chromosome
+    if total_col is None and unmeth_col is None:
+        raise ValueError("Need unmeth_col or total_col to compute chromosome-level beta")
+
     hypo_chr_counts = hypo['chr'].value_counts().reindex(chr_list, fill_value=0).to_dict()
     hyper_chr_counts = hyper['chr'].value_counts().reindex(chr_list, fill_value=0).to_dict()
-    
-    def chr_level_beta(df):
-        """Calculate chromosome-level beta value from CpG-level data."""
-        grouped = df.groupby('chr').agg({meth_col: 'sum', unmeth_col: 'sum'})
-        grouped['chr_level_beta'] = grouped[meth_col] / (grouped[meth_col] + grouped[unmeth_col])
+
+    def chr_level_beta(df: pd.DataFrame) -> np.ndarray:
+        if total_col is not None:
+            grouped = df.groupby('chr').agg({meth_col: 'sum', total_col: 'sum'})
+            grouped['chr_level_beta'] = grouped[meth_col] / grouped[total_col]
+        else:
+            grouped = df.groupby('chr').agg({meth_col: 'sum', unmeth_col: 'sum'})
+            grouped['chr_level_beta'] = grouped[meth_col] / (
+                grouped[meth_col] + grouped[unmeth_col]
+            )
         grouped = grouped.loc[grouped.index.intersection(chr_list)]
         grouped = grouped.reindex(chr_list)
         return grouped['chr_level_beta'].to_numpy()
-    
-    # Calculate chromosome-level beta values
-    hypo_chr_beta = chr_level_beta(hypo)
-    hyper_chr_beta = chr_level_beta(hyper)
-    
-    return hypo_chr_beta, hyper_chr_beta, hypo_chr_counts, hyper_chr_counts
+
+    return (
+        chr_level_beta(hypo),
+        chr_level_beta(hyper),
+        hypo_chr_counts,
+        hyper_chr_counts,
+    )
+
+
+def compute_zscore_frame(
+    hypo: pd.DataFrame,
+    hyper: pd.DataFrame,
+    chr_list: List[str],
+    meth_col: str,
+    unmeth_col: Optional[str] = None,
+    total_col: Optional[str] = None,
+    reference_matrix: Optional[pd.DataFrame] = None,
+) -> pd.DataFrame:
+    """Build the wide one-row z-score table for a hypo/hyper CpG split."""
+    hypo_chr_beta, hyper_chr_beta, hypo_chr_counts, hyper_chr_counts = (
+        calculate_chr_level_beta(
+            hypo, hyper, chr_list, meth_col, unmeth_col, total_col
+        )
+    )
+    hypo_z_intra, hyper_z_intra, s_intra = calculate_s_intra(
+        hypo_chr_beta, hyper_chr_beta, hypo_chr_counts, hyper_chr_counts, chr_list
+    )
+    hypo_z_inter = hyper_z_inter = s_inter = None
+    if reference_matrix is not None:
+        hypo_z_inter, hyper_z_inter, s_inter = calculate_s_inter(
+            hypo_z_intra,
+            hyper_z_intra,
+            hypo_chr_counts,
+            hyper_chr_counts,
+            chr_list,
+            reference_matrix,
+        )
+    return build_output_dataframe(
+        chr_list,
+        hypo_chr_beta,
+        hyper_chr_beta,
+        hypo_z_intra,
+        hyper_z_intra,
+        s_intra,
+        hypo_chr_counts,
+        hyper_chr_counts,
+        hypo_z_inter,
+        hyper_z_inter,
+        s_inter,
+    )
 
 
 def calculate_s_intra(
@@ -422,7 +463,7 @@ def build_output_dataframe(
 )
 @click.option(
     '--beta-cols',
-    default='chr,start,end,target_meth_count,target_unmeth_count,raw_total_count,meandiff',
+    default='chr,start,end,target_meth_count,target_unmeth_count,raw_meth_count,raw_total_count,meandiff',
     type=str,
     help='Comma-separated list of columns to read from beta file'
 )
@@ -537,95 +578,80 @@ def main(
         
         console.print(f"[green]✓[/green] Hypo CpG sites: {report['cpg_list_filtered_hypo_count']:,}")
         console.print(f"[green]✓[/green] Hyper CpG sites: {report['cpg_list_filtered_hyper_count']:,}")
-        
-        # Determine methylation column names
-        console.print("\n[bold cyan]Step 2: Calculating chromosome-level beta values[/bold cyan]")
-        
-        if 'raw_meth_count' in hypo.columns and 'raw_unmeth_count' in hypo.columns:
-            meth_col = 'raw_meth_count'
-            unmeth_col = 'raw_unmeth_count'
-        elif 'target_meth_count' in hypo.columns and 'target_unmeth_count' in hypo.columns:
-            meth_col = 'target_meth_count'
-            unmeth_col = 'target_unmeth_count'
-        else:
-            raise ValueError(
-                "Cannot find methylation columns. Expected either "
-                "'raw_meth_count/raw_unmeth_count' or 'target_meth_count/target_unmeth_count'"
-            )
-        
-        console.print(f"  Using columns: {meth_col}, {unmeth_col}")
-        
-        # Calculate chromosome-level beta values
-        hypo_chr_beta, hyper_chr_beta, hypo_chr_counts, hyper_chr_counts = calculate_chr_level_beta(
-            hypo, hyper, chromosomes, meth_col, unmeth_col
-        )
-        
-        console.print("[green]✓[/green] Chromosome-level beta values calculated")
-        
-        # Calculate s_intra (always calculated)
-        console.print("\n[bold cyan]Step 3: Calculating intra-sample Z-scores (s_intra)[/bold cyan]")
-        
-        hypo_z_intra, hyper_z_intra, s_intra = calculate_s_intra(
-            hypo_chr_beta, hyper_chr_beta, hypo_chr_counts, hyper_chr_counts, chromosomes
-        )
-        
-        console.print("[green]✓[/green] Intra-sample Z-scores calculated")
-        
-        # Calculate s_inter if reference matrix is provided
-        hypo_z_inter = None
-        hyper_z_inter = None
-        s_inter = None
-        
+
+        ref_matrix = None
         if reference_episcore_matrix:
-            console.print("\n[bold cyan]Step 4: Calculating inter-sample Z-scores (s_inter)[/bold cyan]")
-            console.print(f"  Loading reference matrix: {reference_episcore_matrix}")
-            
-            # Load reference matrix
+            console.print("\n[bold cyan]Loading reference matrix[/bold cyan]")
             ref_matrix = pd.read_csv(reference_episcore_matrix, sep='\t')
             console.print(f"[green]✓[/green] Loaded reference matrix: {len(ref_matrix)} samples")
-            
-            # Calculate s_inter using reference
-            hypo_z_inter, hyper_z_inter, s_inter = calculate_s_inter(
-                hypo_z_intra, hyper_z_intra, hypo_chr_counts, hyper_chr_counts,
-                chromosomes, ref_matrix
+
+        # After-MQ (primary): target meth / unmeth. Fall back to raw if target is absent.
+        console.print("\n[bold cyan]Step 2: After-MQ z-scores (target counts)[/bold cyan]")
+        if 'target_meth_count' in hypo.columns and 'target_unmeth_count' in hypo.columns:
+            after_meth, after_unmeth, after_total = (
+                'target_meth_count',
+                'target_unmeth_count',
+                None,
             )
-            
-            console.print("[green]✓[/green] Inter-sample Z-scores calculated")
+        elif 'raw_meth_count' in hypo.columns and 'raw_unmeth_count' in hypo.columns:
+            after_meth, after_unmeth, after_total = (
+                'raw_meth_count',
+                'raw_unmeth_count',
+                None,
+            )
         else:
-            console.print("\n[yellow]Note:[/yellow] No reference matrix provided, skipping s_inter calculation")
-        
-        # Build output DataFrame
-        step_num = 5 if reference_episcore_matrix else 4
-        console.print(f"\n[bold cyan]Step {step_num}: Building output DataFrame[/bold cyan]")
-        
-        output_df = build_output_dataframe(
+            raise ValueError(
+                "Cannot find methylation columns. Expected "
+                "'target_meth_count/target_unmeth_count' "
+                "(or raw_meth_count/raw_unmeth_count as fallback)"
+            )
+        console.print(f"  Using columns: {after_meth}, {after_unmeth or after_total}")
+        output_df = compute_zscore_frame(
+            hypo,
+            hyper,
             chromosomes,
-            hypo_chr_beta,
-            hyper_chr_beta,
-            hypo_z_intra,
-            hyper_z_intra,
-            s_intra,
-            hypo_chr_counts,
-            hyper_chr_counts,
-            hypo_z_inter,
-            hyper_z_inter,
-            s_inter
+            after_meth,
+            unmeth_col=after_unmeth,
+            total_col=after_total,
+            reference_matrix=ref_matrix,
         )
-        
-        console.print(f"[green]✓[/green] Output DataFrame created: {len(output_df.columns)} columns")
-        
-        # Write output file
-        step_num += 1
-        console.print(f"\n[bold cyan]Step {step_num}: Writing output file[/bold cyan]")
-        
-        # Determine compression based on output filename
         compression = 'gzip' if output.endswith('.gz') else None
-        
         output_df.to_csv(output, sep='\t', index=False, float_format='%.6f', compression=compression)
-        
-        console.print(f"[green]✓[/green] Output saved to: {output}")
+        console.print(f"[green]✓[/green] After-MQ output saved to: {output}")
         console.print(f"    Columns: {len(output_df.columns)}")
-        
+
+        # Before-MQ: raw_meth_count / raw_total_count, same site filter and columns.
+        has_raw = (
+            'raw_meth_count' in hypo.columns
+            and 'raw_total_count' in hypo.columns
+        )
+        if has_raw:
+            console.print("\n[bold cyan]Step 3: Before-MQ z-scores (raw meth / raw total)[/bold cyan]")
+            before_df = compute_zscore_frame(
+                hypo,
+                hyper,
+                chromosomes,
+                'raw_meth_count',
+                total_col='raw_total_count',
+                reference_matrix=ref_matrix,
+            )
+            if list(before_df.columns) != list(output_df.columns):
+                raise ValueError(
+                    "before-MQ columns do not match after-MQ: "
+                    f"{list(before_df.columns)} vs {list(output_df.columns)}"
+                )
+            before_path = f"{output_prefix}_zscore_before_mq.tsv"
+            before_df.to_csv(
+                before_path, sep='\t', index=False, float_format='%.6f'
+            )
+            console.print(f"[green]✓[/green] Before-MQ output saved to: {before_path}")
+            console.print(f"    Columns: {len(before_df.columns)}")
+        else:
+            console.print(
+                "\n[yellow]Note:[/yellow] raw_meth_count/raw_total_count not in beta file; "
+                "skipping _zscore_before_mq.tsv"
+            )
+
         console.rule("[bold green]✓ Analysis Complete")
         console.print(f"\n[bold]Output file:[/bold] {output}\n")
         

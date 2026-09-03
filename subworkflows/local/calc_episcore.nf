@@ -95,6 +95,7 @@ workflow CALC_EPISCORE {
         .set { ch_episcore }
 
     emit:
-    beta_value = ch_beta_value
-    episcore   = ch_episcore
+    beta_value           = ch_beta_value
+    episcore             = ch_episcore
+    episcore_before_mq   = BETA_TO_EPISCORE.out.episcore_before_mq
 }
