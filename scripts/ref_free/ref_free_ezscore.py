@@ -400,7 +400,12 @@ def main(
     ep_samples = set(ep_df["sample"].astype(str).unique())
     z_samples = set(z_df["sample"].astype(str).unique())
     meta_samples = set(meta["sample"])
-    ff_pass = set(meta.loc[meta["ff_before_mq"] > min_ff, "sample"].astype(str))
+    ff_num = pd.to_numeric(meta["ff_before_mq"], errors="coerce")
+    if min_ff < 0:
+        # Include samples with missing FF (batch-QC non-preferred units).
+        ff_pass = set(meta["sample"].astype(str))
+    else:
+        ff_pass = set(meta.loc[ff_num >= min_ff, "sample"].astype(str))
     universe = sorted(meta_samples & ep_samples & z_samples & ff_pass)
     if not universe:
         raise click.ClickException("No samples remain after filters")
@@ -419,11 +424,14 @@ def main(
     is_dev_normal = (set_arr == "dev") & is_normal
     is_dev_trisomy = (set_arr == "dev") & is_trisomy
     is_test = set_arr == "test"
+    is_buffer = set_arr == "buffer"
+    is_emergency = set_arr == "emergency"
     # Independent validation samples tagged set=val (Normal or Trisomy only)
     sample_arr = np.asarray(universe, dtype=str)
     not_blacklisted = ~np.isin(sample_arr, list(VAL_BLACKLIST))
     is_val = (set_arr == "val") & (is_normal | is_trisomy) & not_blacklisted
-    eval_mask = is_dev_trisomy | is_test | is_val
+    # Batch-QC analyze cohorts (test/buffer/emergency) are always evaluated.
+    eval_mask = is_dev_trisomy | is_test | is_buffer | is_emergency | is_val
     ref_pool_idx = np.flatnonzero(is_dev_normal)
     eval_idx = np.flatnonzero(eval_mask)
 
@@ -472,6 +480,7 @@ def main(
     console.print(
         f"  eval samples     : {eval_idx.size} "
         f"(dev trisomy={int(is_dev_trisomy.sum())}, test={int(is_test.sum())}, "
+        f"buffer={int(is_buffer.sum())}, emergency={int(is_emergency.sum())}, "
         f"val={int(is_val.sum())})"
     )
     console.print(f"  episcore combos  : {len(ep_combos)}")
